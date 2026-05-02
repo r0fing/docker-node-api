@@ -1,5 +1,7 @@
 const express = require('express');
 const mysql = require('mysql2');
+const redis = require('redis');
+
 const app = express();
 const PORT = 3000;
 
@@ -13,22 +15,44 @@ const pool = mysql.createPool({
    queueLimit: 0
 });
 
-app.get('/api/status', (req, res) => {
-	pool.query('SELECT "Connected to MariaDB successfully!" AS db_status', (error, results) => {
-        if (error) {
-            console.error(error);
-            return res.status(500).json({
-                status: "Database connection failed",
-                error: error.code
+const redisClient = redis.createClient({
+    url: `redis://${process.env.REDIS_HOST}:6379`
+});
+
+redisClient.on('error', (err) => console.error('Redis Client Error', err));
+redisClient.connect().catch(console.error);
+
+app.get('/api/status', async (req, res) => {
+    try {
+        //STEP A: Check Redis first
+        const cachedData = await redisClient.get('my_database_status');
+        
+        if (cachedData) {
+            //CACHE HIT: Return immediately without querying the database
+            return res.json({
+                source: "Redis Cache Hit!",
+                message: cachedData
             });
         }
-        res.json({ 
-            message : "V3: Full Stack Application is Live!", status: "Healthy",
-            database_test: results[0].db_status 
+        //STEP B: Cache Miss. Query from database
+        pool.query('SELECT "Data pulled from hard drive!" AS db_status', async (error, results) => {
+            if (error) throw error;
+            
+            const dbData = results[0].db_status
+            
+            //STEP C: Save the result to Redis for 60 seconds
+            await redisClient.setEx('my_database_status', 60, dbData);
+            
+            res.json({
+                source: "MariaDB Database Hit!",
+                message: dbData
+            });
         });
-    });
+    } catch (error) {
+        res.status(500).send(error_message);
+    }
 });
 
 app.listen(PORT, () => {
-	console.log('Server running on port ${PORT}')
+	console.log(`Server running on port ${PORT}`)
 });
